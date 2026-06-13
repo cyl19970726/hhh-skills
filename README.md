@@ -2,6 +2,27 @@
 
 一组用于 **Claude Code / agent** 的可复用 skill —— 覆盖 AI 3D/AR 制作管线、多 agent 编排方法论、小红书内容研究等。每个目录是一个独立 skill(含 `SKILL.md` 描述 + 配套脚本/参考)。
 
+## ⚠️ 前置依赖:workflow 工具(harness CLI)
+
+其中 **`author-workflow`** 和 **`video-understand`** 的 `.star` 编排都依赖 **`harness` CLI**(`harness workflow run-script`)。这个 workflow 工具来自配套仓库,**请下载并安装对应版本**:
+
+> **https://github.com/cyl19970726/multi-agent-harness**
+
+```bash
+# 构建 harness CLI(workflow 运行时)
+git clone https://github.com/cyl19970726/multi-agent-harness.git
+cd multi-agent-harness
+cargo build -p harness-cli                 # 产出 target/debug/harness
+cp target/debug/harness ~/.local/bin/      # 放进 PATH(或 cargo build --release)
+
+# author-workflow 这个 skill 的"出厂地"也是该仓库,可直接装:
+scripts/install-skill.sh --agent both
+#   或 Claude Code 插件市场:
+#   /plugin marketplace add cyl19970726/multi-agent-harness && /plugin install author-workflow
+```
+
+> 注意**版本要对应**:本仓库这些 skill 写法对应的是 multi-agent-harness 当前的 workflow API(Starlark `run-script`、`workflow()/agent()/parallel()` 等)。harness 升级后若 API 变动,以该仓库 README 为准。
+
 ## 用法
 
 把需要的 skill 目录放进 `~/.claude/skills/`(或整仓 clone 进去):

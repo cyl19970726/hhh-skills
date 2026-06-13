@@ -5,6 +5,11 @@ description: "Use when an agent needs to author a dynamic multi-agent workflow a
 
 # Author Workflow
 
+> **前置依赖 / Prerequisite:** 这个 skill 依赖 `harness` CLI(`harness workflow
+> run-script`),它来自配套仓库 **https://github.com/cyl19970726/multi-agent-harness**
+> —— 请先下载并安装**对应版本**(`cargo build -p harness-cli` 后把 `harness` 放进 PATH;
+> 该仓库也是本 skill 的"出厂地",可用 `scripts/install-skill.sh --agent both` 或插件市场安装)。
+
 Use this skill to make a shell-capable agent (Codex, Claude Code, or any other)
 author a workflow at runtime and run it through the harness, with no MCP or
 plugin. Starlark is the SOLE dynamic authoring surface: write a `.star` program

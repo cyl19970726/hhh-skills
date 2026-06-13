@@ -63,6 +63,8 @@ python3 prep_video.py --file ./clip.mp4
 
 A. **harness dynamic workflow(首选,可复现+落 dashboard)**:`video_understand.star`,一条命令跑完
    全片视觉枚举 + 内容理解,run 被 journal、能在 Agent Dashboard 回看:
+   > 需先安装 `harness` CLI(workflow 工具),来自 **https://github.com/cyl19970726/multi-agent-harness**;
+   > 见 `author-workflow` skill 与该仓库 README。版本要与该仓库的 workflow API 对应。
    ```bash
    # 1) 先抽密集帧+OCR
    bash skills/video-understand/enumerate_tools.sh <video.mp4> /tmp/vu_dense 1/2
