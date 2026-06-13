@@ -77,21 +77,54 @@ def extract_keyframes(mp4, out, frames, scene):
         f.unlink()
 
     def _ff(vf):
-        run(["ffmpeg", "-y", "-v", "error", "-i", str(mp4),
-             "-vf", vf, "-vsync", "vfr", "-frames:v", str(frames), str(out / "kf-%03d.jpg")])
+        # scale=...:-2 保证偶数高、-pix_fmt yuvj420p 避开 tv-range/奇数高视频上 mjpeg 编码器崩溃;
+        # 失败返回 False 而非抛异常,让"场景帧→定频"的回退在失败时也能触发
+        try:
+            run(["ffmpeg", "-y", "-v", "error", "-i", str(mp4),
+                 "-vf", vf, "-fps_mode", "vfr", "-pix_fmt", "yuvj420p",
+                 "-frames:v", str(frames), str(out / "kf-%03d.jpg")])
+            return True
+        except subprocess.CalledProcessError:
+            return False
 
     # 场景切变;metadata=print 把每个保留帧的 pts_time 写进 kf_times.txt
-    _ff(f"select='gt(scene,{scene})',metadata=print:file={times_file},scale=640:-1")
+    _ff(f"select='gt(scene,{scene})',metadata=print:file={times_file},scale=640:-2")
     kfs = sorted(out.glob("kf-*.jpg"))
-    if len(kfs) < 5:  # 场景帧太少 → 定频回退
+    if len(kfs) < 5:  # 场景帧太少/抽帧失败(口播·录屏类画面变化小,scene 检不到切变) → 定频回退
         for f in kfs:
             f.unlink()
-        _ff(f"fps=1/9,metadata=print:file={times_file},scale=640:-1")
+        _ff(f"fps=1/9,metadata=print:file={times_file},scale=640:-2")
         kfs = sorted(out.glob("kf-*.jpg"))
     times = parse_frame_times(times_file)
+    if len(times) < len(kfs):
+        # 定频回退时 metadata=print 常写不出 pts;fps=1/9 是均匀的,按 i*9 推算时间戳
+        times = [round(i * 9.0, 2) for i in range(len(kfs))]
     pairs = []
     for i, k in enumerate(kfs):
         pairs.append((k, times[i] if i < len(times) else None))
+    return pairs
+
+
+def densify(mp4, out, ranges, fps=5.0):
+    """二次细看:对粗览标记的"有戏/看不懂"时间段密集抽帧(默认每秒 5 帧)。
+    ranges: [(start_s, end_s), ...];跨所有段顺序编号 d-001.jpg…,返回 [(jpg_path, t), ...]。
+    -ss 在 -i 前做快速 seek;第 j 帧时间 ≈ start + j/fps。"""
+    for f in out.glob("d-*.jpg"):
+        f.unlink()
+    pairs, idx = [], 1
+    for (s, e) in ranges:
+        for f in out.glob("__dz-*.jpg"):
+            f.unlink()
+        try:
+            run(["ffmpeg", "-y", "-v", "error", "-ss", str(s), "-to", str(e), "-i", str(mp4),
+                 "-vf", f"fps={fps},scale=640:-2", "-pix_fmt", "yuvj420p", str(out / "__dz-%04d.jpg")])
+        except subprocess.CalledProcessError:
+            continue
+        for j, t in enumerate(sorted(out.glob("__dz-*.jpg"))):
+            new = out / f"d-{idx:03d}.jpg"
+            t.rename(new)
+            pairs.append((new, round(s + j / fps, 2)))
+            idx += 1
     return pairs
 
 
@@ -129,6 +162,17 @@ def write_aligned(out, pairs, segments):
     (out / "aligned.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_dense(out, pairs, segments):
+    """二次细看密帧的音画对齐 → dense.md。"""
+    lines = ["# 密帧二次细看(自适应抽帧)\n",
+             "对粗览标记的'有戏/看不懂'时间段密集抽帧;每帧标注该时刻口播。agent 请配合实际 Read 图片看。\n",
+             "| 时间 | 密帧 | 此刻口播 |", "|---|---|---|"]
+    for k, t in pairs:
+        spoken = spoken_at(t, segments).replace("|", "/").replace("\n", " ")
+        lines.append(f"| {fmt_ts(t)} | {k.name} | {spoken} |")
+    (out / "dense.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser(description="小红书视频理解管线(下载+音轨+whisper+抽帧+音画对齐)")
     g = ap.add_mutually_exclusive_group(required=True)
@@ -140,6 +184,8 @@ def main():
     ap.add_argument("--lang", default="zh")
     ap.add_argument("--frames", type=int, default=12, help="关键帧上限")
     ap.add_argument("--scene", type=float, default=0.25, help="场景切变阈值")
+    ap.add_argument("--densify", help="二次细看:只对这些时间段密集抽帧,如 '65-80,120-135'(秒);跳过音轨/whisper")
+    ap.add_argument("--densify-fps", type=float, default=5.0, help="densify 抽帧频率(帧/秒,默认 5)")
     a = ap.parse_args()
 
     tag = a.note or (Path(a.file).stem if a.file else "url")
@@ -159,13 +205,37 @@ def main():
             _rnote().download_video(a.url, str(mp4))
     print(f"[1/4] 视频就绪: {mp4}")
 
+    # 二次细看(B):只对指定时间段密抽,复用已有 whisper 分段做对齐,然后退出
+    if a.densify:
+        ranges = []
+        for part in a.densify.split(","):
+            part = part.strip()
+            if part:
+                s, e = part.split("-")
+                ranges.append((float(s), float(e)))
+        dpairs = densify(mp4, out, ranges, a.densify_fps)
+        segs = []
+        wj0 = out / "audio.json"
+        if wj0.exists():
+            data = json.loads(wj0.read_text(errors="ignore"))
+            segs = [{"start": s.get("start"), "end": s.get("end"), "text": s.get("text", "")}
+                    for s in data.get("segments", [])]
+        write_dense(out, dpairs, segs)
+        print(f"[densify] 密帧 {len(dpairs)} 张(段: {a.densify})-> {out}/dense.md")
+        return
+
     wav = out / "audio.wav"
     run(["ffmpeg", "-y", "-v", "error", "-i", str(mp4),
          "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)])
     print(f"[2/4] 音轨: {wav}")
 
-    pairs = extract_keyframes(mp4, out, a.frames, a.scene)
-    print(f"[3/4] 关键帧: {len(pairs)} 张(带时间戳)")
+    # 关键帧抽取做成非致命:即便 ffmpeg 抽帧整体失败,也不能连累后面的 whisper 逐字稿
+    try:
+        pairs = extract_keyframes(mp4, out, a.frames, a.scene)
+        print(f"[3/4] 关键帧: {len(pairs)} 张(带时间戳)")
+    except Exception as e:
+        pairs = []
+        print(f"[3/4] 关键帧抽取失败(已跳过,不影响逐字稿): {e}")
 
     # whisper:输出 all → 同时得到 txt(可读) 与 json(带时间戳分段)
     run(["whisper", str(wav), "--language", a.lang, "--model", a.model,
