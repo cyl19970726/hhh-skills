@@ -1,0 +1,24 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+.tripo-key
+*.key
+*.pem
+credentials*
+*token*.json
+
+# python
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+
+# work artifacts
+outputs/
+.local/
+*.log
+
+# os
+.DS_Store
