@@ -114,6 +114,8 @@ type=context.append_loop_event
 平台差异要点：
 
 - 工具补丁目标从 `args.path` 或 `args.file_path` 取；命令从 `args.command` 取。
+- `tool.result` 不重复工具名，只给 `toolCallId`；适配器用该 ID 与先前的 `tool.call`
+  关联，不能靠“最近一次调用”猜测（同一步可先发多次 call、再批量返回 result）。
 - token 用量来自 `step.end.usage` 的 `inputOther + inputCacheRead + inputCacheCreation`。
 - `finishReason=stop|end_turn` 映射为 `turn_complete`；
   `aborted|cancelled|error` 映射为 `turn_aborted`。

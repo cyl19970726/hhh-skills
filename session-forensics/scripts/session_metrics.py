@@ -201,6 +201,7 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
     out_volume: Counter[str] = Counter()
     out_calls: Counter[str] = Counter()
     pending_call: str | None = None
+    call_names: dict[str, str] = {}
 
     for e in iter_events(path, max_lines, fmt=fmt):
         if e.kind == "eof":
@@ -249,6 +250,9 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
             tools[e.name] += 1
             call_at.append(e.line)
             pending_call = e.name
+            call_id = e.extra.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                call_names[call_id] = e.name
             targets = e.extra.get("patch_targets")
             if not targets:
                 targets = [m.strip() for m in PATCH_TARGET_RE.findall(e.text)]
@@ -268,7 +272,9 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
                 commands[" ".join(str(cmd).split())[:90]] += 1
             continue
         if e.kind == "tool_output":
-            owner = e.name or pending_call or "?"
+            call_id = e.extra.get("call_id")
+            correlated = call_names.pop(call_id, None) if isinstance(call_id, str) else None
+            owner = e.name or correlated or pending_call or "?"
             out_volume[owner] += e.size
             out_calls[owner] += 1
             pending_call = None

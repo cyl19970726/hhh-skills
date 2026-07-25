@@ -199,6 +199,15 @@ seg 32  floor 43,470      seg 60  floor 76,979      +242%，且加速
 
 ## 已知解析陷阱（踩过）
 
+Kimi 同一步可以先连续记录多条 `tool.call`，随后才批量写对应的 `tool.result`。
+`tool.result` 没有工具名，只有 `toolCallId`；若只记“最近一次调用”，大部分输出会被归到 `?`。
+来源会话 `c813e95c-d5c5-4853-ae93-0612a645e43c` 的修复前后：
+
+```
+修复前   ?             13 calls   0.04M chars   74.6%
+修复后   按 toolCallId 归属；? = 0 calls
+```
+
 补丁可能通过 `exec` 以内嵌 JS 字符串执行（`const patch = "*** Begin Patch\n*** Update File: ..."`），
 其中换行是字面的 `\` + `n`。贪婪的 `(.+)` 会吞掉整个补丁体并把它当成文件路径，
 **污染 patch 计数、文件数与整个仪器分叉检测**。实测差异：

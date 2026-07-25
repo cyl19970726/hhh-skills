@@ -285,6 +285,7 @@ def _kimi_events(rec: dict[str, Any], line: int) -> Iterator[Event]:
 
     if etype == "tool.call":
         name = str(ev.get("name") or "?")
+        call_id = ev.get("toolCallId")
         args = ev.get("args")
         raw = json.dumps(args, ensure_ascii=False) if not isinstance(args, str) else args
         targets = []
@@ -295,12 +296,15 @@ def _kimi_events(rec: dict[str, Any], line: int) -> Iterator[Event]:
         cmd = args.get("command") if (name in _KIMI_EXEC_TOOLS and isinstance(args, dict)) else None
         yield Event(line, "evidence", "tool_call", name=name, text=raw,
                     extra={"patch_targets": targets, "command": cmd,
-                           "is_exec": name in _KIMI_EXEC_TOOLS})
+                           "is_exec": name in _KIMI_EXEC_TOOLS,
+                           "call_id": call_id})
     elif etype == "tool.result":
+        call_id = ev.get("toolCallId")
         res = ev.get("result")
         out = res.get("output") if isinstance(res, dict) else res
         out = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
-        yield Event(line, "evidence", "tool_output", size=len(out), text=out)
+        yield Event(line, "evidence", "tool_output", size=len(out), text=out,
+                    extra={"call_id": call_id})
     elif etype == "content.part":
         part = ev.get("part") or {}
         ptype = part.get("type")
