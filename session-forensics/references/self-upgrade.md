@@ -99,6 +99,8 @@ skill 自身也是会话产物，同一张签名表对它有效：
 ## 已完成的升级（倒序）
 
 ```
+2026-07  修正“会话终值”假设：019f8fa7 后续从 9439→10045 行，
+         view_image 51→60；终态断言必须绑定采样时间 + 行数/文件哈希
 2026-07  新增 flood_share/flood_tool（三会话三画像验证）；晋升 4 条 gate
          （view_image / read_thread / exec 内嵌补丁 / wait 裸等）
 2026-07  修 PATCH_TARGET_RE 贪婪匹配 → forked_share 0.028→0.179（6.4 倍）
