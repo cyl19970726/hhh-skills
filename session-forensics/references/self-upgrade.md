@@ -105,6 +105,26 @@ skill 自身也是会话产物，同一张签名表对它有效：
 ## 已完成的升级（倒序）
 
 ```
+2026-07  建成三件缺失装配/harness：harvest_report.py（P2 装配，此前"harvest report = P2"是无证宣称）、
+         drill.py（有界钻取，≤50 行/窗口 + ≤3 窗口/会话从纪律变为拒绝执行）、
+         sync_skill.sh（三副本传播，编译闸→rsync→全树 md5→local/ 泄漏检查→只暂存 skill 路径→
+         push 后校验 HEAD==origin/main，逐关拒绝）。后两者按"复发 ≥3 次且有稳定序列"晋升：
+         有界钻取在 019f9a28 有 jq/sed/python 三种写法 + 审计 agent 第 4 种；
+         三副本传播三次失效（草稿落后 166 行 / 会话末 4 文件分叉 / 写完 G0 当天又分叉）。
+         用全树 md5 而非 canary grep：canary 只抓记得加的已证伪结论，字节相等抓全部。
+2026-07  修 Codex tool_output 归属：Codex 的 function_call_output **完全不带 call_id**
+         （019f7843 实测 6147/6147 为 None），归属靠紧邻上一个 tool_call；而代码收到第一条
+         output 后就清空 pending_call → 同一调用的后续 output 全掉进 "?"。
+         实测该会话 "?" = 172 calls / 8.76M 字符。改为 pending_call 只由下一个 tool_call 重置。
+         ⚠️ 连带修正：那 172 条实际属于 view_image 与 exec_command，
+         **该会话此前记录的 view_image 9 calls / 8.61M 是偏低的，真值 12 calls / 15.60M**。
+         凡引用过该会话 view_image 绝对值的地方都要按此上修。
+2026-07  修 handoff §1「逐字」合同：user message 上限 400→8000（USER_MSG_CAP），
+         表格保留 150 字预览但加显式截断标记 + 新增「§1 附：逐字全文」段落输出完整原话。
+         旧实现会把长指令在 150 字处切断且**不留任何截断痕迹**，接手方继承的是另一个目标。
+2026-07  签名表新增「检测层」一列（代码 / agent / 代码→agent），11 条逐条标注；
+         SKILL.md §4 同步更正：四条主签名里只有「仪器分叉」是纯代码可测，
+         「定义分叉」「无证宣称」是语义等价判断。此前"发生即命中"读起来像"脚本会报"。
 2026-07  修 P2 原料：新增 top_shapes（命令归一化到"操作"级：剥 codex JS 外壳、把 heredoc/
          引号内程序体变不透明、剥 VAR= 绑定、抹路径/ID/时间戳）+ failing_calls 按操作归属失败。
          回测 019f9a28：三副本传播 rsync 从"完全不可见"变为上榜 6 次；sed fail=6 / jq fail=4。

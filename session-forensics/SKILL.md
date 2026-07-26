@@ -145,11 +145,32 @@ python3 "$SESSION_FORENSICS_DIR/scripts/session_metrics.py" <session.jsonl> --js
 （全部 |r|<0.22，排序榜也不富集）。指标能说清**发生了什么**——预算流向哪、哪个文件在几个
 工作树分叉、地板涨到多少——但**说不了这个会话是好是坏**。判断由读它的人或审计 agent 做。
 
-定性签名（仪器分叉、定义分叉、无证宣称、目标失联）无阈值问题，发生即命中，也仍然只是证据。
+定性签名无阈值问题，发生即命中，也仍然只是证据。
+⚠️ **但"发生即命中"不等于"脚本会告诉你"。** 这四条里只有一条是纯代码可测的：
+
+```
+仪器分叉    代码        同一 basename 在 ≥2 个工作树根下被 patch
+定义分叉    agent       同一术语是否已漂移，是语义等价判断
+无证宣称    agent       "这个验证动作是否覆盖了那个宣称"，是语义等价判断
+目标失联    代码→agent  脚本给首尾，"还有关系吗"必须判
+```
+
+`references/signatures.md` 的签名表有 **检测层** 一列，逐条标了是 `代码` / `agent` / `代码→agent`。
+**读表前先看那一列**——否则会把"要人读的东西"当成"脚本会报的东西"，这正是无证宣称本身。
 
 ### 5. 有界钻取
 
-只对命中项回原文，按行号取窗口，每会话 ≤3 个窗口。
+**用 `drill.py`，不要手写 jq / sed / python 一次性脚本。**
+
+```bash
+python3 "$SESSION_FORENSICS_DIR/scripts/drill.py" <session.jsonl> --grep "rsync -a" --limit 10
+python3 "$SESSION_FORENSICS_DIR/scripts/drill.py" <session.jsonl> 664:700 --cap 400
+```
+
+它把 ≤50 行/窗口、≤3 窗口/会话这两条从"纪律"变成"拒绝执行"，并跨三个平台统一渲染。
+理由：`019f9a28` 里同一个"按行号取窗口"操作用了 **jq / sed / python 三种互不相同的写法**，
+审计那个会话的 agent 又写了第 4 种——**同一操作 4 个副本，正是本 skill 的「仪器分叉」签名
+长在自己的核心步骤上**；而四种写法没有一个真的执行了 50 行上限（上限只有在有东西会拒绝时才存在）。
 
 ### 6. 终点是一个动作，不是报告
 
@@ -162,15 +183,39 @@ python3 "$SESSION_FORENSICS_DIR/scripts/session_metrics.py" <session.jsonl> --js
 ```bash
 python3 "$SESSION_FORENSICS_DIR/scripts/handoff_packet.py" <session.jsonl> --out handoff.md
 ```
-脚本填 §1/§2/§4/§5 与附录（纯物证），其余留 TODO 桩。
+脚本填 §0/§1/§2/§4/§5 与附录（纯物证），其余留 TODO 桩。
 **§6 已证伪留空 = packet 未完成**——不写，接手方会把前任的错误结论当既定事实继承。
+**§0 任务续接点**给出「初始目标 → 当前目标」演化图与"接手方第一件事"，防止 §10 按审计员优先级排序。
 
+沉淀走 harvest 装配：
+
+```bash
+python3 "$SESSION_FORENSICS_DIR/scripts/harvest_report.py" <session.jsonl> --out harvest.md
+```
+脚本填操作剖面、单次成本剖面（**按 per-call 排，不按占比**）、脚本可判的 gate 违反计数；
+§4 晋升判定与 §5 结果绑定留桩——**跨 exe 的实现分叉是语义等价判断，这一层做不到**。
+⚠️ §5 明确写了**不要用「成功」做绑定**（绿测试与 `repo_commit` 两种成功凭据都已被证伪），
+**绑失败更可靠**：失败是物证，不需要叙事背书。
 
 ```
 观察 1 次                  → handoff packet（模板见 references/handoff-packet.md）
 跨会话复发 2 次             → 失效边 / gate      （禁止性："别做 X / X 之后 Y 失效"）
 复发 ≥3 次且有稳定操作序列   → skill（+harness）  （生成性："要做 Z 就按此序列"）
 ```
+
+### 7.5 收尾：改完 skill 必须传播（不跑等于没改）
+
+```bash
+bash "$SESSION_FORENSICS_DIR/scripts/sync_skill.sh"                     # 传播 + 校验
+bash "$SESSION_FORENSICS_DIR/scripts/sync_skill.sh" --check             # 只校验
+bash "$SESSION_FORENSICS_DIR/scripts/sync_skill.sh" --commit "<msg>" --push
+```
+
+本 skill 在磁盘上有三份（`.claude/skills` 源 → `.codex/skills` → `hhh-skills` 公开）。
+**同一失效边复发三次**：草稿副本落后 166 行 / 会话末 4 文件分叉且两条已证伪结论仍在 2 个副本里生效 /
+写完 gate 当天又分叉一次。所以它不再是叮嘱：脚本按 编译闸 → rsync → **全树 md5 三副本比对** →
+`local/` 泄漏检查 → 只暂存 skill 路径并证明无越界 → push 后校验 `HEAD == origin/main` 逐关拒绝。
+用全树 md5 而不是 canary grep：canary 只抓你记得加的那几条已证伪结论，字节相等抓全部。
 
 ### 8. 自我升级（每次使用后必做，不可跳过）
 
@@ -214,6 +259,20 @@ n=1 只记为单例观察；结论有边界就补边界，不要覆盖旧结论�
 **绝不返回 0**——Kimi 的 `compactions=0` 会让一个会话看起来毫无压缩问题。
 
 心智模型与签名表**与平台无关**，差异只在「原始记录 → 规范化事件」这一层。详见 `references/platforms.md`。
+
+## 脚本
+
+| 脚本 | 用途 |
+|---|---|
+| `session_locate.py` | 按 thread-id / 时间窗 / 体积定位会话（**先用它，不要 `find`**） |
+| `calibrate.py` | 生成本地基线到 `local/`（首次必跑） |
+| `session_metrics.py` | 主测量，GB → KB |
+| `drill.py` | 有界钻取，硬闸 ≤50 行/窗口、≤3 窗口/会话 |
+| `handoff_packet.py` | handoff 装配（含 §0 任务续接点） |
+| `harvest_report.py` | harvest 装配（操作剖面 + per-call 成本 + gate 违反计数） |
+| `sync_skill.sh` | 三副本传播 + 发布，逐关拒绝 |
+| `session_events.py` | 跨平台规范化事件层（被上面各脚本复用） |
+| `batch_scan.py` `confirm_patterns.py` | 阈值标注集 / 本人不满句式库 |
 
 ## 参考
 

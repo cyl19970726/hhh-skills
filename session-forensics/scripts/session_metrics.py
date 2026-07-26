@@ -126,6 +126,15 @@ def is_pump(text: str) -> bool:
     return len(t) <= _PUMP_MAXLEN and t in PUMP_TOKENS
 
 
+# The handoff contract for §1 is "逐字，未转述". A 400-char preview broke it
+# silently: a long instruction gets cut mid-sentence and the receiver inherits a
+# truncated goal without any marker that it was truncated. User messages are a
+# rounding error against a GB-scale file (65 substantive messages on the 946 MB
+# session 019f7843), so the streaming constraint does not justify 400.
+# Kept bounded anyway — a pasted log can land in a user message.
+USER_MSG_CAP = 8000
+
+
 # ---------------------------------------------------------------- P2 (harvest)
 # `top_commands` buckets raw command prefixes, so the same operation lands in a
 # different bucket every time its paths or flags differ — and under Codex the
@@ -421,7 +430,7 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
             if not body or is_ambient(body):
                 user_ambient += 1
             else:
-                user_real.append((e.line, " ".join(body.split())[:400]))
+                user_real.append((e.line, " ".join(body.split())[:USER_MSG_CAP]))
             continue
         if e.kind == "tool_call":
             tools[e.name] += 1
@@ -466,7 +475,13 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
             owner = e.name or correlated or pending_call or "?"
             out_volume[owner] += e.size
             out_calls[owner] += 1
-            pending_call = None
+            # Do NOT clear pending_call here. Codex `function_call_output`
+            # records carry no call_id at all (6147/6147 on 019f7843), so
+            # attribution is purely positional; clearing on the first output
+            # dumped every SUBSEQUENT output of the same call into "?" —
+            # measured 172 calls / 8.76M chars unattributed on that session.
+            # A late output belongs to the most recent call, not to nobody.
+            # pending_call is reset by the next tool_call, which is correct.
             bad = FAIL_RE.search(e.text) or TIMEOUT_RE.search(e.text)
             if FAIL_RE.search(e.text):
                 failures += 1

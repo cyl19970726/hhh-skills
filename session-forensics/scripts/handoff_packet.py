@@ -81,8 +81,13 @@ def section_objectives(r: dict[str, Any]) -> str:
     subs = r["objective_trace"]["substantive"]
     lines = ["## 1. 原始目标（逐字，未转述）", "",
              "| 行号 | 原话 | 性质 |", "|---|---|---|"]
+    truncated = False
     for ln, msg in subs[:40]:
-        lines.append(f"| L{ln} | {msg[:150].replace('|', '/')} | {STUB} |")
+        cell = msg[:150].replace("|", "/")
+        if len(msg) > 150:
+            cell += " …（逐字全文见 §1 附）"
+            truncated = True
+        lines.append(f"| L{ln} | {cell} | {STUB} |")
     if len(subs) > 40:
         lines.append(f"| … | 另有 {len(subs)-40} 条，见 `objective_trace.substantive` | |")
     pumps = r["objective_trace"]["pump_genuine"]
@@ -91,6 +96,16 @@ def section_objectives(r: dict[str, Any]) -> str:
                   f"纯推进 {len(pumps)} 条、网络续跑 {len(resumes)} 条（后者是环境噪声，非用户意图）。",
               "", "**P3 判定**（目标演化是否全部由 user message 引入；若否，指出 agent 自漂起点）：",
               STUB, ""]
+    if truncated:
+        # The table is for scanning; it cannot hold a long instruction. But §1's
+        # contract is 逐字 — a receiver who inherits a sentence cut at 150 chars
+        # inherits a different goal and has no marker telling them so. So the
+        # table gets a preview + pointer, and the full text is emitted below.
+        lines += ["### §1 附：逐字全文（表格里被截断的那几条）", ""]
+        for ln, msg in subs[:40]:
+            if len(msg) <= 150:
+                continue
+            lines += [f"**L{ln}**", "", "> " + msg.replace("\n", "\n> "), ""]
     return "\n".join(lines)
 
 
