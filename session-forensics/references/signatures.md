@@ -342,6 +342,43 @@ Codex 在用户附图时把真实请求包成：
 `substantive=18 pump=4 ambient=2`（命中其 Stage 1 原验收标准）；
 Kimi `wire.jsonl` 仍报 `compactions=None`（非 0）；Codex `019f9774` 仍为 `substantive=9 pump=2 resume=3`。
 
+### 上一处修复只堵了一半：`WRAPPER_MARKERS` 绑死前导 marker（来源 `019f93b3-ae93-7c41-b060-12aadf98b3a5`，Codex，777 MB / 40543 行）
+
+2026-07-26 早些时候引入的 `unwrap_user()` 用的是 `marker → delimiter` **二元组**，
+要求前导 marker 必须是 `# Files mentioned by the user:` 才剥壳。但 Codex 会在**任意** ambient 块
+之后追加同一个分隔符：
+
+```
+<in-app-browser-context source="ambient-ui-state">
+  ...自动注入的 UI 状态...
+</in-app-browser-context>
+
+## My request for Codex:
+接下来完整的review下我们这部分的架构还有没有一些架构问题存在      ← 真请求
+```
+
+`<in-app-browser-context` 与 `<environment_context>` 都在 `AMBIENT_MARKERS` 里，
+而 `# Files mentioned by the user:` 不在 head → `unwrap_user` 不触发 → 整条丢弃。
+
+实测规模：**138 条 ambient 里 108 条携带真请求**，`substantive` 少报 **94 → 187（少 50%）**。
+
+```
+修复前   substantive=94   pump=25  resume=6  ambient=138
+修复后   substantive=187  pump=37  resume=9  ambient=30
+```
+
+⚠️ **这一次的失真不在"首"，在"尾"**——与 `019f9a28` 正好相反。`first_substantive` 恰好正确
+（L11 未被包裹），但**最后一条、决定会话终局的指令 L40395 被吞掉**。后果是
+「首尾一刀」把一次**用户明确要求的架构 review**读成了 **agent 自漂**：
+尾部 20% 全是 review 动作，而可见的最后一条用户指令是 L39871「提交 pr -> review」，
+两者对不上 → 会误判为"agent 自己跑去做架构审查"。
+
+→ **纪律：`first_substantive` 正确不代表 objective trace 正确。首尾一刀要两端都验壳。**
+
+**已修复（2026-07-26）**：新增 `STANDALONE_DELIMS = ("## My request for Codex:",)`，
+在 `unwrap_user()` 里**先于** `WRAPPER_MARKERS` 全文搜索，命中即剥壳，不看前导 marker。
+分隔符本身就是充分条件——它只由 harness 产生，前缀是什么都不影响它后面是真请求。
+
 ### `forked_share` 的适用边界（边界修正，不推翻旧值）
 
 `forked_share` 只测**会话内 patch 落在多少个副本路径上**，测不到"**源副本被改、派生副本落后**"。

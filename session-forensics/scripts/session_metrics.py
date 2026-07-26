@@ -55,6 +55,14 @@ WRAPPER_MARKERS = (
     ("# Files mentioned by the user:", "## My request for Codex:"),
 )
 
+# Delimiters that start the real request no matter which wrapper preceded them.
+# Codex emits `## My request for Codex:` after ANY ambient block, not just the
+# files-mentioned one. Keying the peel off the leading marker discarded 108 of
+# 138 wrapped messages in 019f93b3 (777 MB) — the whole second half of the
+# objective trace, including the final instruction, which made a user-requested
+# architecture review look like agent self-drift.
+STANDALONE_DELIMS = ("## My request for Codex:",)
+
 # Messages that carry no instruction — the user acting as a while-loop counter.
 PUMP_TOKENS = {
     "继续", "可以", "好", "好的", "嗯", "ok", "OK", "行", "下一步",
@@ -99,6 +107,10 @@ def unwrap_user(text: str) -> str:
     carries no request (then it IS ambient). Non-wrapped text passes through.
     """
     head = text[:400]
+    for delim in STANDALONE_DELIMS:
+        idx = text.find(delim)
+        if idx >= 0:
+            return text[idx + len(delim):].strip()
     for marker, delim in WRAPPER_MARKERS:
         if marker not in head:
             continue
@@ -112,6 +124,132 @@ def unwrap_user(text: str) -> str:
 def is_pump(text: str) -> bool:
     t = re.sub(r"[\s。，,.!！?？~、]+", "", text)
     return len(t) <= _PUMP_MAXLEN and t in PUMP_TOKENS
+
+
+# ---------------------------------------------------------------- P2 (harvest)
+# `top_commands` buckets raw command prefixes, so the same operation lands in a
+# different bucket every time its paths or flags differ — and under Codex the
+# JS wrapper `const r = await tools.exec_command({cmd:"...` eats the first 45
+# chars, so the leaderboard ranks the wrapper instead of the work. Measured on
+# 019f9a28: the rsync that propagates the skill to three copies ran 5 times by
+# hand, was skipped the 6th, and caused a real divergence — yet it does not
+# appear in top_commands at all. Harvest needs the operation, not the string.
+CMD_WRAPPER_RE = re.compile(r'["\']?cmd["\']?\s*:\s*"((?:[^"\\]|\\.)*)"', re.S)
+SHAPE_NOISE = (
+    (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"), " "),
+    (re.compile(r"\b[0-9a-f]{7,40}\b"), " "),
+    (re.compile(r"\d{4}-\d{2}-\d{2}(?:[T_][\d:.-]+)?"), " "),
+    (re.compile(r"\d+"), " "),
+)
+SHAPE_TOKEN_RE = re.compile(r"[A-Za-z_][\w.+:-]*")
+ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
+# Leading words that are shell scaffolding, not the operation being performed.
+SHELL_SCAFFOLD = frozenset({
+    "do", "then", "else", "elif", "fi", "done", "if", "while", "for", "in",
+    "cd", "set", "export", "source", "sudo", "time", "nohup", "exec", "env",
+    "echo", "true", "false", "printf", "local", "eval",
+})
+ABS_PATH_RE = re.compile(r"/(?:[\w.@+-]+/){1,}[\w.@+-]+")
+MAX_SEGMENTS = 12          # bound the work on pathological one-liners
+MAX_RAW_PER_SHAPE = 16     # we only need the ">=2 implementations" signal
+
+
+# Codex drives tools through a JS harness. `cmd:"..."` is only ONE of its forms;
+# 019f7843 (946 MB) uses `const patch = "..."; text await tools.apply_patch(patch)`
+# and `tools.write_stdin(...)`, which the cmd-only unwrap left untouched — its
+# shape leaderboard came out 60% JS scaffolding. Calibrating a normalizer on a
+# single session is how that happens; this one is checked against two.
+JS_TOOL_RE = re.compile(r"tools\.(\w+)\s*\(")
+
+
+def _unwrap_cmd(cmd: str) -> tuple[str, str | None]:
+    """Return (shell body, canonical tool name if this is a non-shell tool call).
+
+    For `tools.exec_command({cmd:"..."})` the operation is the shell command, so
+    the body is returned. For any other `tools.X(...)` the operation IS X — there
+    is no shell command to shape, and pretending otherwise ranks the harness.
+    """
+    tool = None
+    m = JS_TOOL_RE.search(cmd)
+    if m:
+        tool = m.group(1)
+    inner = CMD_WRAPPER_RE.search(cmd)
+    if inner:
+        return inner.group(1).replace("\\n", "\n").replace('\\"', '"'), None
+    if tool and tool not in ("exec_command", "exec", "shell"):
+        return "", f"js:{tool}"
+    return cmd.replace("\\n", "\n").replace('\\"', '"'), None
+
+
+# An embedded program body (heredoc, jq filter, python -c) is an ARGUMENT of one
+# operation, not a sequence of operations. Segmenting through it makes every
+# `import`, `def`, `select`, `return` line look like an executable — measured on
+# 019f9a28 that produced 47 bogus "exes" for a single target file. Blind the
+# splitter to these bodies before segmenting.
+HEREDOC_RE = re.compile(r"<<-?\s*'?\"?(\w+)'?\"?\n.*?\n\s*\1\b", re.S)
+SQUOTE_RE = re.compile(r"'[^']*'", re.S)
+DQUOTE_RE = re.compile(r'"[^"]*"', re.S)
+
+
+def _opaque_bodies(body: str) -> str:
+    # Drop them entirely rather than leaving a placeholder: any alphabetic
+    # placeholder gets picked up by SHAPE_TOKEN_RE and becomes a fake token.
+    body = HEREDOC_RE.sub(" ", body)
+    body = SQUOTE_RE.sub(" ", body)
+    body = DQUOTE_RE.sub(" ", body)
+    return body
+
+
+def cmd_shapes(cmd: str) -> list[str]:
+    """Every operation performed by one command line, as comparable shapes.
+
+    Counts operations, NOT exec calls: `mkdir -p X && rsync ...` contains two.
+    That is the right unit for harvest — "how many times did I do this thing".
+    """
+    raw, tool = _unwrap_cmd(str(cmd))
+    if tool:
+        return [tool]
+    body = _opaque_bodies(raw)
+    out: list[str] = []
+    for seg in re.split(r"[\n;|]+|&&", body)[:MAX_SEGMENTS]:
+        seg = seg.strip()
+        if not seg:
+            continue
+        for rx, sub in SHAPE_NOISE:
+            seg = rx.sub(sub, seg)
+        # `VAR=value` is a binding, not an operation. Strip leading bindings
+        # (this also handles the `ENV=x real-command args` prefix form); a
+        # segment that is nothing but bindings has no operation in it at all.
+        while True:
+            stripped = ENV_ASSIGN_RE.sub("", seg, count=1)
+            if stripped == seg:
+                break
+            seg = stripped.lstrip().split(" ", 1)[1] if " " in stripped.lstrip() else ""
+        if not seg.strip():
+            continue
+        toks = SHAPE_TOKEN_RE.findall(seg)
+        while toks and toks[0] in SHELL_SCAFFOLD:
+            toks = toks[1:]
+        if not toks:
+            continue
+        exe = os.path.basename(toks[0])
+        if exe in SHELL_SCAFFOLD or len(exe) < 2:
+            continue
+        keep = [exe] + [t for t in toks[1:4] if not t.startswith("<")]
+        shape = " ".join(keep)[:60]
+        if shape:
+            out.append(shape)
+    return out
+
+
+def cmd_targets(cmd: str) -> list[str]:
+    """Absolute file paths this command touches, however they were referenced.
+
+    Picked up from the whole command (including `F=/path` assignments and
+    heredoc bodies) because that is where the real target usually hides.
+    """
+    body, _ = _unwrap_cmd(str(cmd))
+    return [p for p in ABS_PATH_RE.findall(body) if "." in os.path.basename(p)]
 
 
 def trigrams(s: str) -> set[str]:
@@ -216,6 +354,11 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
     basename_roots: defaultdict[str, set[str]] = defaultdict(set)
     commands: Counter[str] = Counter()
     tools: Counter[str] = Counter()
+    # P2 harvest material
+    shapes: Counter[str] = Counter()
+    shape_raw: defaultdict[str, set[str]] = defaultdict(set)
+    shape_fail: Counter[str] = Counter()
+    pending_shapes: set[str] = set()
     execs = failures = timeouts = 0
     instrument_patches = business_patches = 0
 
@@ -304,6 +447,18 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
                 execs += 1
                 cmd = e.extra.get("command") or e.text
                 commands[" ".join(str(cmd).split())[:90]] += 1
+                # P2: operation-level view, parallel to the raw `commands`
+                # counter above (which stays untouched so max_cmd_share keeps
+                # its calibrated baseline).
+                seen_here = set()
+                for shape in cmd_shapes(cmd):
+                    shapes[shape] += 1
+                    seen_here.add(shape)
+                    raw = " ".join(str(cmd).split())[:120]
+                    bucket = shape_raw[shape]
+                    if len(bucket) < MAX_RAW_PER_SHAPE:
+                        bucket.add(raw)
+                pending_shapes = seen_here
             continue
         if e.kind == "tool_output":
             call_id = e.extra.get("call_id")
@@ -312,10 +467,17 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
             out_volume[owner] += e.size
             out_calls[owner] += 1
             pending_call = None
+            bad = FAIL_RE.search(e.text) or TIMEOUT_RE.search(e.text)
             if FAIL_RE.search(e.text):
                 failures += 1
             if TIMEOUT_RE.search(e.text):
                 timeouts += 1
+            if bad:
+                # Which operation is producing the failures — top-level
+                # failures/timeouts are session totals and cannot answer this.
+                for shape in pending_shapes:
+                    shape_fail[shape] += 1
+            pending_shapes = set()
             continue
 
     total_patches = sum(patches.values())
@@ -399,6 +561,25 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
             "top_patched": patches.most_common(10),
             "top_commands": commands.most_common(8),
             "top_tools": tools.most_common(12),
+            # P2 harvest material, at the operation level rather than the raw
+            # string level. `calls` counts operations (a compound command line
+            # contributes each of its operations), so it does not sum to execs.
+            #
+            # `distinct_invocations` measures PARAMETER diversity, not
+            # implementation forking. Measured on 019f9a28: rsync=2 (only the
+            # destination changed) but sed=16 (a different file/range每次).
+            # A high value therefore means "widely parameterised", NOT "being
+            # reinvented". Implementation forking — jq vs sed vs python3 doing
+            # the same job, which is the actual harness signal — is a semantic
+            # equivalence judgement across DIFFERENT executables and is not
+            # decidable at this layer. The reading agent must make that call
+            # from the trace; do not add a field that pretends otherwise.
+            "top_shapes": [
+                {"shape": s, "calls": n,
+                 "distinct_invocations": min(len(shape_raw[s]), MAX_RAW_PER_SHAPE),
+                 "failing_calls": shape_fail.get(s, 0)}
+                for s, n in shapes.most_common(20)
+            ],
             "failures": failures, "timeouts": timeouts,
             "instrument_patches": instrument_patches, "business_patches": business_patches,
             "output_volume_by_tool": [

@@ -52,6 +52,31 @@ def quantile_of(value: float, dist: dict[str, Any] | None) -> str:
     return "<p25"
 
 
+def section_resume_point(r: dict[str, Any]) -> str:
+    """§0 — the first thing the receiver reads: is the current goal still the initial one?
+
+    §1 records the evolution but nothing forced §10 to inherit it, so an auditor
+    would diagnose "legitimate evolution" and then order the next steps by its
+    own findings. Measured on 019f9a28: the user's deliverable got pushed to
+    item 3 while tool fixes were labelled blocking. Putting the delta at the
+    very top makes skipping the re-alignment visible.
+    """
+    subs = r["objective_trace"]["substantive"]
+    first = subs[0] if subs else None
+    last = subs[-1] if subs else None
+    out = ["## 0. 任务续接点 —— 当前目标是否还是初始目标", "",
+           "```"]
+    if first:
+        out.append(f"初始目标（L{first[0]}）  {first[1][:150]}")
+    if last and last is not first:
+        out.append(f"最后一条（L{last[0]}）  {last[1][:150]}")
+    out += ["```", "",
+            "**当前活的目标（逐条对照 §1 后填写，不许照抄初始目标）**：", "", STUB, "",
+            "**接手方第一件事**（必须服务当前目标；审计员发现的工具问题属于支撑项）：", "",
+            STUB, ""]
+    return "\n".join(out)
+
+
 def section_objectives(r: dict[str, Any]) -> str:
     subs = r["objective_trace"]["substantive"]
     lines = ["## 1. 原始目标（逐字，未转述）", "",
@@ -149,7 +174,7 @@ def build(path: Path, skill_dir: Path) -> str:
         f"# Handoff Packet · {path.name}", "",
         "> 物证优先的**索引**，不是摘要。每条结论挂行号或可复现命令；接手方按指针回原文。",
         "> 带 TODO 标记的小节需要判断，脚本不填。**§6 已证伪留空 = packet 未完成。**", "",
-        section_objectives(r), section_state(r),
+        section_resume_point(r), section_objectives(r), section_state(r),
         "## 3. 心智模型 / 设计定稿\n\n" + STUB + "\n\n（唯一允许以叙事为主的一节，因此必须最短。）\n",
         section_data(r, base),
         "## 5. 基线 / 对照\n\n" +
@@ -165,7 +190,10 @@ def build(path: Path, skill_dir: Path) -> str:
         "## 7. 未证伪的假设\n\n一直当真、从未验证的东西；标注为何未验证、决定性证据在哪。\n\n" + STUB + "\n",
         "## 8. 失效表\n\n当前已知失效边 + 本会话违反了哪几条。\n\n" + STUB + "\n",
         "## 9. 明确非目标\n\n" + STUB + "\n",
-        "## 10. 下一步（按依赖排序）+ 最小可反驳实验\n\n"
+        "## 10. 下一步 —— 按 **§0 认定的当前目标** 排序，不按审计员优先级\n\n"
+        "写完回头对一次：**第 1 项服务的是用户当前目标吗？** 若第 1 项是修工具 / 修副本 /\n"
+        "修 parser 而当前目标是产出某个交付物，顺序就错了——除非能说清交付物物理上依赖它。\n"
+        "审计员发现的问题写进「支撑项」，不自动获得优先级。\n\n"
         "最后必须有一条：**什么结果会证伪当前整条路线。**\n\n" + STUB + "\n",
         "## 附：可复现命令\n\n```bash\n"
         f"python3 {skill_dir}/scripts/session_metrics.py \\\n  {path} --json-out /tmp/metrics.json\n"
