@@ -42,9 +42,17 @@ AMBIENT_MARKERS = (
     "<environment_context>",
     "<codex_internal_context",
     "<system-reminder",
+    "<task-notification",
     "<INSTRUCTIONS>",
     "AGENTS.md instructions for",
-    "# Files mentioned by the user:",
+)
+
+# Harness blocks that WRAP a real user request instead of replacing it.
+# Treating these as ambient silently deletes genuine objectives — and the first
+# one at that, which is exactly what "首尾一刀" reads. Peel, do not discard.
+# marker -> body delimiter after which the real request starts
+WRAPPER_MARKERS = (
+    ("# Files mentioned by the user:", "## My request for Codex:"),
 )
 
 # Messages that carry no instruction — the user acting as a while-loop counter.
@@ -52,7 +60,15 @@ PUMP_TOKENS = {
     "继续", "可以", "好", "好的", "嗯", "ok", "OK", "行", "下一步",
     "继续下一步", "可以继续", "继续执行", "可以开始", "开始", "go", "next",
     "继续吧", "可以的", "对", "是",
+    # Verb-bearing advance phrases: longer than the old 8-char cap, still zero
+    # instruction content. Missing these inflates `substantive` and zeroes
+    # `pump_share` (实测 019f9a28 L90「然后继续你的工作」).
+    "然后继续", "然后继续你的工作", "继续你的工作", "继续工作",
+    "继续你的任务", "继续任务", "接着做", "然后呢",
 }
+# Exact-whitelist matching already bounds false positives; the length cap is
+# just a belt. Derive it from the set instead of hardcoding 8.
+_PUMP_MAXLEN = max(len(t) for t in PUMP_TOKENS)
 
 
 def text_of(content: Any) -> str:
@@ -76,9 +92,26 @@ def is_ambient(text: str) -> bool:
     return any(m in head for m in AMBIENT_MARKERS)
 
 
+def unwrap_user(text: str) -> str:
+    """Peel harness wrappers off a user message.
+
+    Returns the real request body. Returns "" when a wrapper is present but
+    carries no request (then it IS ambient). Non-wrapped text passes through.
+    """
+    head = text[:400]
+    for marker, delim in WRAPPER_MARKERS:
+        if marker not in head:
+            continue
+        idx = text.find(delim)
+        if idx < 0:
+            return ""
+        return text[idx + len(delim):].strip()
+    return text
+
+
 def is_pump(text: str) -> bool:
     t = re.sub(r"[\s。，,.!！?？~、]+", "", text)
-    return len(t) <= 8 and (t in PUMP_TOKENS or any(t == p for p in PUMP_TOKENS))
+    return len(t) <= _PUMP_MAXLEN and t in PUMP_TOKENS
 
 
 def trigrams(s: str) -> set[str]:
@@ -241,10 +274,11 @@ def scan(path: Path, max_lines: int | None = None) -> dict[str, Any]:
             reasoning_items += 1
             continue
         if e.kind == "user_msg":
-            if is_ambient(e.text):
+            body = unwrap_user(e.text)
+            if not body or is_ambient(body):
                 user_ambient += 1
             else:
-                user_real.append((e.line, " ".join(e.text.split())[:400]))
+                user_real.append((e.line, " ".join(body.split())[:400]))
             continue
         if e.kind == "tool_call":
             tools[e.name] += 1

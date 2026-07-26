@@ -99,6 +99,22 @@ skill 自身也是会话产物，同一张签名表对它有效：
 ## 已完成的升级（倒序）
 
 ```
+2026-07  晋升第 5 条 gate「派生副本失效传播」（复发第 2 次）：019f9a28 的 .claude→.codex→
+         hhh-skills 三副本分叉 4 文件，两条已证伪结论仍在 2/3 副本里生效；
+         同时给 forked_share 补边界（会话内 0.0 ≠ 磁盘无分叉，须会话外补 md5 对照）
+2026-07  发现 ambient 前缀名单双向失真（019f9a28）：包裹型注入
+         "# Files mentioned by the user:" 吞掉真初始目标 → first_substantive 由 L9 误报为 L73；
+         同会话「然后继续你的工作」漏判 pump。假阴性与假阳性互相抵消导致计数正常、成员全错。
+         已修复：WRAPPER_MARKERS + unwrap_user() 剥壳，PUMP_TOKENS 补推进句式、长度上限由白名单导出。
+         first_substantive L73→L9；三平台回归无变化（64803a4e 仍 18/4/2，Kimi 仍 None）。
+         附带教训：验收式「pump ≥ 1」写错了——L90 合法地落进 resume 桶，
+         只盯单桶的验收式会把正确修复判成失败，应写「pump+resume ≥ 1 且不在 substantive」
+2026-07  明确 P2 自动化边界：当前只有高频/成本候选，没有跨会话稳定序列与成功结果绑定；
+         同时发现 handoff“逐字目标”合同与 400/150 字 preview 截断实现不一致
+2026-07  修正“compaction 删除目标所以漂移”：019f93b3 第 60 次压缩仍保留
+         229 条 user 消息；真实损失是 supersedes/证据关系与多级分派 provenance
+2026-07  dogfood 诞生会话时发现 Claude <task-notification> 以 role=user 落盘；
+         将其归入 ambient，真实 substantive user 20→18，消除伪重述诉求
 2026-07  修正“会话终值”假设：019f8fa7 后续从 9439→10045 行，
          view_image 51→60；终态断言必须绑定采样时间 + 行数/文件哈希
 2026-07  新增 flood_share/flood_tool（三会话三画像验证）；晋升 4 条 gate

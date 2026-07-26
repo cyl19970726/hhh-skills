@@ -44,6 +44,33 @@ forked files       0       1       4       8      11
 | **假 provenance**（单例观察 n=1） | audit/证据 JSON 里写着 `repo_commit: <sha>`，但产出它的仪器 `git log --all -- <仪器>` 为**空**（从未提交） | B |
 | **孤儿产物**（单例观察 n=1） | 产物 mtime > session 文件最后 mtime → 子 agent 在父会话终止后仍在写盘，该证据**无人看过** | B |
 | **owner 视野落后一代**（单例观察 n=1） | owner 常驻目录里的状态板文件与领先分支的同名文件逐行冲突，且落后方是 owner 唯一可见的那份 | B |
+| **实参漂移**（单例观察 n=1） | 同一 derivation 函数被 ≥2 个 caller 调用（生产端 + 独立验证端），新增的作用域/豁免参数只传给了其中一个 → 两端对同一份产物推出**相反的终态** | B |
+
+### 实参漂移的实测来源（`d9993d69-4861-4618-9995-331f9c771263`，Claude Code，2026-07-25 19:40→00:29 本地）
+
+```
+机制            status-gate.mjs::summarizeStatus 有两个 caller：run-scenario.mjs（写 manifest）
+                与 validate-evidence.mjs（独立复核 manifest）。会话末尾给 summarizeStatus 加了
+                新参数 outOfScopeFixtures，只在 run-scenario.mjs 一侧计算并传入。
+                → manifest 自报 completed / blockers=[] / maxClaim=auto_verified_candidate；
+                  validate-evidence 仍按旧参数推导，判 source_invalid，四条 failure 全是
+                  "must be derived as partial"。CLI 终态 blocked。
+为何执行 agent 看不见   lint=0、全量 874 test 绿（L1022）→ 单元层完全无信号；
+                        差异只在「两个 caller 传参不同」这一跨文件事实上。
+                        随后 L1023 跑验收、L1025 会话被 401 掐断，终态从未被任何 agent 读到。
+检测成本        rg 出 derivation 函数的全部 caller，比对新增参数是否每个 caller 都传。零解析。
+与「定义分叉」的区别    定义分叉是两份**实现**各自演化；实参漂移是**同一份实现**被喂了不同实参，
+                        共享代码反而掩盖了它——看 diff 只看到「加了个可选参数，默认值安全」。
+```
+n=1，记为单例观察，未晋升 gate。但它同时命中既有的 **孤儿产物**（终态产物 mtime 00:29 = 会话死亡时刻，
+无人看过）——两条签名叠加时，产物里的自报状态**必然**被下一代当既定事实继承，这是最贵的一种裂缝。
+
+⚠️ **后续修正（同日）：签名定位了缺陷类，但没有定位修复点。**
+「补上漏传的实参」是错的解法——独立盲审判 reject：真正的缺陷在**两个 caller 的共同上游**
+（runner 给 backend 侧做了作用域过滤、page 侧漏了），补参数等于在闸里豁免一条本就不该产生的记录，
+命中该仓「禁为过 CI 改闸」红线。修上游后两端自然一致，闸一行没动。
+**通用教训：实参漂移是「两端不一致」的症状，修复点可能在两端之外。看到漂移先问「谁本该产生这份输入」，
+不要默认对齐两端即可。** 审计员给出的是缺陷类，不是补丁——这条正是「禁止解题」的实证理由。
 
 ### 三条新签名的实测来源（`019f8fa7-57e6-7a71-9d54-35b82ae37db8`，2026-07-23→25，9439 行/83 MB）
 
@@ -187,10 +214,37 @@ read_thread(turnLimit=10)  → 单次 ~138 万 token ≈ 5.4 个窗口。禁止�
                              且补丁全文会进两次上下文（arguments 一次、output 一次）。
 wait(等待子 agent)         → 实测 avg 168,100 字符 ≈ 4.2 万 token/次；331 次共约 1390 万 token。
                              多 agent 会话特有。轮询必须有界，不能裸等。
+一次看 N 张图              → 不要逐张 view_image / Read。先用 PIL 拼成一张带标签的 contact sheet
+                             再读：N 次调用塌成 1 次，且**保留了横向对比**——逐张看时
+                             「只有这一张不一样」恰恰是最难发现的。
 ```
+
+**contact sheet 的实操约束**（来源：`d9993d69` 后续会话，2026-07-26，用户提出）：
+拼图不是单纯为省 token，降采样有下限——**要读的证据往往就是图上的小字**。实测按宽 500px
+（原图 780px，约 2/3）拼 3 张为 1500×999、676KB，中文错误文案仍清晰可读；再小就读不出了。
+所以规则是「拼成一张 + 保住可读比例」，不是「压到最小」。该次拼图直接命中一条业务假绿：
+三张里唯一一张显示「兑换资格同步失败」，而它在 manifest 里是 `passed`。
 
 `read_thread` 那次已经设了 `turnLimit:10` + `includeOutputs:false` + `maxOutputCharsPerItem:20000`
 **仍然**返回 554 万字符——**它的参数不足以约束体积**，不能依赖参数自保。
+
+### 第五条 gate —— 派生副本失效传播（复发第 2 次，按 SKILL.md §8 提前晋升）
+
+```
+改了源副本 → 所有派生副本 + 其中的结论同时作废，必须同批传播才算生效。
+```
+两次实测，同一根因、不同形态：
+
+```
+n=1  scratchpad/session_metrics.py(307 行) 与 skill/scripts/session_metrics.py(473 行) 并存，
+     草稿副本落后 166 行                                  → 处置：删非权威副本
+n=2  019f9a28：.claude(源) → .codex/skills → hhh-skills(GitHub) 三副本，
+     最后三次写回后未 rsync/未 commit，4 文件分叉，
+     两条已证伪结论仍在 2/3 副本里生效                     → 见上节 md5 表
+```
+→ **凡审计"其产物会被复制/发布"的对象（skill、模板、脚本、契约文档），
+必须把「源改动 → 派生副本 → 已发布副本」当成一条失效边显式量一次。**
+一条被推翻的结论只修了源副本 = **没修**，因为加载派生副本的 agent 会继续传播它。
 
 ## 地板抬升：早先结论的边界修正
 
@@ -206,6 +260,21 @@ seg 32  floor 43,470      seg 60  floor 76,979      +242%，且加速
 
 → 修正表述：**地板抬升在 ~20 次压缩内可忽略，超过 ~40 次后成为主要约束，且斜率递增。**
 判据用 `floor / window`，不用压缩次数。
+
+### Compaction 与目标漂移：不要混淆因果
+
+实测 `019f93b3` 的第 60 次 compaction：`replacement_history` 仍有 **229 条 role=user 消息**。
+因此“目标原话被 compaction 删掉 → 目标漂移”不是 Codex 上的真实机制。
+
+真实风险是**关系退化**：用户目标仍在，但没有结构化 `supersedes` 链；82 个子 agent 的任务与结果又
+经历父目标→子任务→子报告→父摘要的多级投影。Compaction 丢弃的是支撑取舍的物证与跨段关系，
+使最近局部目标更容易主导当前工作集。故：
+
+```
+compaction 多                         ≠ 已证明目标漂移
+初始/最终动作不一致且无 user 变更依据   = P3 可确认的 agent 自漂
+目标多且全部有 user 依据                = 合法演化，但需要 handoff 重建 supersedes 图
+```
 
 ## 已知解析陷阱（踩过）
 
@@ -227,6 +296,72 @@ Kimi 同一步可以先连续记录多条 `tool.call`，随后才批量写对应
 修复后   patches=2063  files= 459  forked_share=0.179     ← 6.4 倍
 ```
 正则必须写成 `([^\n\"\\]+)`。
+
+### ambient 前缀名单会吞掉真目标（双向失真，来源 `019f9a28-21ee-7b01-8de0-92bcfce977c6`，Codex，n=1 单例观察但机制确定）
+
+`is_ambient()` 的实现是 `any(m in text[:400] for m in AMBIENT_MARKERS)` —— **整条二值判定**。
+它对"整条都是注入"有效，对"**注入包裹了真请求**"失效：
+
+```
+Codex 在用户附图时把真实请求包成：
+    # Files mentioned by the user:
+    ## <图片路径>
+    ## My request for Codex:
+    <真正的用户指令>          ← 命中前缀 "# Files mentioned by the user:" 后整条被丢弃
+```
+
+实测 `019f9a28`：**L9 是真初始目标**（含"我被 claude 误封了"这一决定全局优先级的约束），
+被判为 ambient → `objective_trace.first_substantive` 误报为 L73。
+**"首尾一刀"整个建立在 `first_substantive` 上，此陷阱会让初始目标判定系统性错位。**
+
+同一会话反向也错一次：L90「然后继续你的工作」是纯推进，`PUMP_TOKENS` 只收录短应答词、
+不含带动词的推进句式 → 计入 substantive，`pump_share` 因此报 0.0（假值）。
+
+⚠️ **最危险的一点：总数看起来是对的。** 该会话 `substantive=9`，而正确成员集
+（L9/L73/L121/L276/L365/L400/L514/L526/L552）也恰好是 9 条 —— 一个假阴性与一个假阳性互相抵消，
+**计数无异常、成员全错**。因此校验 ambient/pump 必须核对**成员**，不能只核对计数。
+
+**已修复（2026-07-26）**：把包裹型标记从 `AMBIENT_MARKERS` 拆到新的 `WRAPPER_MARKERS`
+（`marker → body delimiter` 二元组），新增 `unwrap_user()` 先剥壳再判 ambient；
+壳内无正文时才计 ambient。`PUMP_TOKENS` 补入带动词的推进句式，长度上限由白名单自动导出
+（原硬编码 `<=8` 恰好卡掉 8 字的「然后继续你的工作」）。修复前后（`019f9a28`）：
+
+```
+修复前   substantive=9  ambient=2  pump=0  resume=0
+         成员 = [73,90,121,276,365,400,514,526,552]   ← 少 L9、多 L90
+修复后   substantive=9  ambient=1  pump=0  resume=1
+         成员 = [ 9,   121,276,365,400,514,526,552] + 73  ← 正确成员集
+         first_substantive: L9「…我被claude 误封了…」
+```
+⚠️ **验收时的一处偏差要记住**：预期 L90 落到 `pump`，实测落到 `resume`。
+原因是 `is_pump` 先命中、随后被"环境噪声扣除"规则（`task_complete` 邻接）判为网络续跑。
+两者都不进 `substantive`，结论不变；但**「pump ≥ 1」这个验收式写错了，正确写法是
+`pump + resume ≥ 1` 且 L90 不在 substantive 成员集里**。验收式只盯一个桶，会被合法的桶间再分类误判为失败。
+
+跨平台回归（三平台，无变化）：Claude Code 诞生会话 `64803a4e` 仍为
+`substantive=18 pump=4 ambient=2`（命中其 Stage 1 原验收标准）；
+Kimi `wire.jsonl` 仍报 `compactions=None`（非 0）；Codex `019f9774` 仍为 `substantive=9 pump=2 resume=3`。
+
+### `forked_share` 的适用边界（边界修正，不推翻旧值）
+
+`forked_share` 只测**会话内 patch 落在多少个副本路径上**，测不到"**源副本被改、派生副本落后**"。
+实测 `019f9a28`：`forked_share=0.0000`（会话内所有 patch 都只打在 `.claude/skills/` 一份上），
+而同一时刻磁盘上 3 份副本里 **4 个文件 md5 不同**：
+
+```
+                             .claude   .codex   hhh-skills
+references/mental-model.md    2b5234   2b5b22   2b5b22     DIVERGED
+references/signatures.md      4e6e44   910c4e   910c4e     DIVERGED
+references/self-upgrade.md    d61f52   c4f8ec   c4f8ec     DIVERGED
+scripts/session_metrics.py    cf26f0   3b8d32   3b8d32     DIVERGED
+grep -c "229 条"      →  1        0        0
+grep -c "P2 仍是半自动" →  1        0        0
+```
+
+即两条**已证伪结论**仍在两个已分发副本里生效。
+→ 与 `local/gates.md` G1 同一根因（单会话视野测不到仓库层副本），但形态相反：
+G1 是"同名仪器在上百个树里"，这里是"派生副本落后一代"。
+**审计任何"改了会被 rsync/发布出去"的对象时，必须在会话外补一次副本 md5 对照，不能只看 `forked_share`。**
 
 ## 统计口径纪律（本节由三次连续踩错逼出来）
 
@@ -304,3 +439,10 @@ n=101 全语料验证结论：**没有任何结构指标能预测「会话是否
   只聚出 2 条，第 3 次因换了说法未入簇）。宁漏勿误报。
 - `is_pump` 只覆盖中英文常见应答词，需随语料扩充。
 - `INSTRUMENT_RE` 用路径启发式判定"仪器"，跨项目需校准。
+- **P2 仍是半自动。** 当前脚本会给出 `top_tools / top_commands / top_patched /
+  output_volume_by_tool`，可发现“高频、昂贵、反复手工执行”的候选，但尚未实现跨会话 tool-sequence
+  motif、成功结果绑定与稳定边界提取。“复发 ≥3 次且有稳定操作序列 → skill（+harness）”目前是
+  人工/审计 agent 的晋升合同，不是自动判定器。Token 成本只能排候选优先级，不能单独决定是否晋升。
+- **目标 trace 当前是 preview，不是逐字档案。** `session_metrics.py` 为控制内存把每条 user message
+  截到 400 字，`handoff_packet.py` 表格再截到 150 字；这与 handoff 模板“原始目标逐字、不转述”的
+  合同不一致。生成正式 packet 时必须按行号二次流式提取完整 user message；该自动化尚待补齐。
